@@ -85,7 +85,7 @@ class UrlfetchClient(object):
         resp = self.httpclient.request(url, payload=body, method=method, headers=headers)
 
         if resp.status_code != 200:
-            self._raise_service_error(url, resp.status_code, resp.headers['content-type'], resp.body)
+            self._raise_service_error(url, resp.status_code, resp.headers['content-type'], body)
 
         return (resp, resp.content)
 

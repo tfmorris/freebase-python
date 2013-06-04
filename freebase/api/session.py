@@ -614,7 +614,6 @@ class HTTPMetawebSession(MetawebSession):
         
         if isinstance(sq, list):
             subq['cursor'] = True
-
         
         service = '/api/service/mqlread'
 
@@ -728,6 +727,8 @@ class HTTPMetawebSession(MetawebSession):
         see http://www.freebase.com/docs/web_services/mqlwrite"""
         query = envelope.copy()
         query.update(query=sq, escape=False)
+        if use_permission_of:
+            query['use_permission_of'] = use_permission_of
         if attribution_id:              # strange badly named api
             query['attribution'] = attribution_id
 

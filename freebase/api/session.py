@@ -41,7 +41,7 @@ declarations for external metaweb api.
 __all__ = ['MetawebError', 'MetawebSession', 'HTTPMetawebSession', 'attrdict']
 __version__ = '1.0.4'
 
-import os, sys, re
+import os, re
 import cookielib
 import mimetools
 
@@ -102,8 +102,6 @@ try:
     from urllib import quote as urlquote
 except ImportError:
     from urlib_stub import quote as urlquote
-import pprint
-import socket
 import logging
 
 LITERAL_TYPE_IDS = set([
@@ -268,69 +266,34 @@ class HTTPMetawebSession(MetawebSession):
     
     this version uses the HTTP api, and is synchronous.
     """
-    # share cookies across sessions, so that different sessions can
-    #  see each other's writes immediately.
     _default_cookiejar = cookielib.CookieJar()
-    
+
     def __init__(self, service_url, username=None, password=None, prev_session=None, cookiejar=None, cookiefile=None, application_name=None, acre_service_url=None):
         """
-        create a new MetawebSession for interacting with the Metaweb.
+        create a new MetawebSession for interacting with Freebase.
         
         a new session will inherit state from prev_session if present,
         """
         super(HTTPMetawebSession, self).__init__()
         
+        if username:
+            raise Exception("authenticated access not supported.  Please convert to new client lib.")
+        
+        if prev_session or cookiejar or cookiefile or acre_service_url:
+            raise Exception("Unsupported parameters.  Only service URL supported in compatibility mode.")
+        
         self.log = logging.getLogger("freebase")
         self.application_name = application_name
-        
-        assert not service_url.endswith('/')
-        if not '/' in service_url:  # plain host:port
-            service_url = 'http://' + service_url
-        
-        self.service_url = service_url
 
-        if service_url[7:].startswith('www') or service_url[7:].startswith('api'):
-            self._base_url = service_url[11:]
-        else:
-            self._base_url  = service_url[7:]
-
-        self.acre_service_url = acre_service_url or "http://acre.%s" % self._base_url
-
-        self.username = username
-        self.password = password
+        self.service_url = "https://www.googleapis.com/freebase/v1"
         
+        if service_url and service_url.find("sandbox") > 0:
+            self.service_url += "sandbox"
+
         self.tid = None
-        
-        if prev_session:
-            self.service_url = prev.service_url
-        
-        if cookiefile is not None:
-            cookiejar = self.open_cookie_file(cookiefile)
-        
-        if cookiejar is not None:
-            self.cookiejar = cookiejar
-        elif prev_session:
-            self.cookiejar = prev_session.cookiejar
-        else:
-            self.cookiejar = self._default_cookiejar
-        
-        self._http_request = http_client(self.cookiejar, self._raise_service_error)
 
-    
-    def open_cookie_file(self, cookiefile=None):
-        if cookiefile is None or cookiefile == '':
-            if os.environ.has_key('HOME'):
-                cookiefile = os.path.join(os.environ['HOME'], '.pyfreebase/cookiejar')
-
-            else:
-                raise MetawebError("no cookiefile specified and no $HOME/.pyfreebase directory" % cookiefile)
+        self._http_request = http_client(self._default_cookiejar, self._raise_service_error)
         
-        cookiejar = cookielib.LWPCookieJar(cookiefile)
-        if os.path.exists(cookiefile):
-            cookiejar.load(ignore_discard=True)
-        
-        return cookiejar
-
     
     def _httpreq(self, service_path, method='GET', body=None, form=None,
                  headers=None, service='me'):
@@ -345,21 +308,25 @@ class HTTPMetawebSession(MetawebSession):
         resp is the response object and may be different depending
         on whether urllib2 or httplib2 is in use?
         """
-        
+
         if method == 'GET':
             assert body is None
         if method != "GET" and method != "POST":
             assert 0, 'unknown method %s' % method
         
         if service == 'me':
-            url = self.service_url + service_path
+            if service_path.startswith("/api/service"):
+                url = self.service_url + "/" + service_path.split("/")[3]
+            else:
+                raise Exception("Unsupported service " + service_path)
         else:
-            url = self.acre_service_url + service_path
+#            url = self.acre_service_url + service_path
+            raise Exception("Acre calls not supported by new API")
 
         if headers is None:
             headers = {}
         else:
-            headers = _normalize_headers(headers)
+            raise Exception("Headers parameter not supported")
         
         # this is a lousy way to parse Content-Type, where is the library?
         ct = headers.get('content-type', None)
@@ -394,15 +361,6 @@ class HTTPMetawebSession(MetawebSession):
                 url += '?' + qstr
 
         
-        # assure the service that this isn't a CSRF form submission
-        headers['x-requested-with'] = 'Freebase-Python'
-        
-        if 'user-agent' not in headers:
-            user_agent = ["python", "freebase.api-%s" % __version__]
-            if self.application_name:
-                user_agent.append(self.application_name)
-            headers['user-agent'] = ' '.join(user_agent)
-        
         ####### DEBUG MESSAGE - should check log level before generating
         loglevel = self.log.getEffectiveLevel()
         if loglevel <= 20: # logging.INFO = 20
@@ -417,24 +375,17 @@ class HTTPMetawebSession(MetawebSession):
                 headerstr = '\nHEADERS:\n  ' + '\n  '.join([('%s: %s' % (k,v))
                                                   for k,v in headers.items()])
             self.log.info('%s %s%s%s', method, url, formstr, headerstr)
-        
-        # just in case you decide to make SUPER ridiculous GET queries:
-        if len(url) > 1000 and method == "GET":
-            method = "POST"
-            url, body = url.split("?", 1) 
-            ct = 'application/x-www-form-urlencoded'
-            headers['content-type'] = ct + '; charset=utf-8'
-           
+
         return self._http_request(url, method, body, headers)
     
     def _raise_service_error(self, url, status, ctype, body):
         
-        is_jsbody = (ctype.endswith('javascript')
-                     or ctype.endswith('json'))
+        is_jsbody = (ctype.startswith('application/javascript')
+                     or ctype.startswith('application/json'))
         if str(status) == '400' and is_jsbody:
             r = self._loadjson(body)
-            msg = r.messages[0]
-            raise MetawebError(u'TID: %s %s %s %r' % (r.get('transaction_id', ''), msg.get('code',''), msg.message, msg.info))
+            err = r.error
+            raise MetawebError(u'%s %s %r' % ( err.get('code',''), err.message, err.errors))
         
         raise MetawebError, 'request failed: %s: %s\n%s' % (url, status, body)
     
@@ -470,10 +421,12 @@ class HTTPMetawebSession(MetawebSession):
         return struct2attrdict(r)
     
     def _check_mqlerror(self, r):
-        if r.code != '/api/status/ok':
-            for msg in r.messages:
-                self.log.error('mql error: %s %s %r' % (msg.code, msg.message, msg.get('query', None)))
-            raise MetawebError, 'query failed: %s %s\n%s\n%s' % (r.transaction_id, r.messages[0].code, r.messages[0].message, json.dumps(r.messages[0].get('query', None), indent=2))
+#        if r.code != '/api/status/ok':
+#            for msg in r.messages:
+#                self.log.error('mql error: %s %s %r' % (msg.code, msg.message, msg.get('query', None)))
+#            raise MetawebError, 'query failed: %s %s\n%s\n%s' % (r.transaction_id, r.messages[0].code, r.messages[0].message, json.dumps(r.messages[0].get('query', None), indent=2))
+        # If we got this far, everything succeeded
+        pass
     
     def _mqlresult(self, r):
         self._check_mqlerror(r)
@@ -488,44 +441,13 @@ class HTTPMetawebSession(MetawebSession):
         """sign in to the service. For a more complete description,
         see http://www.freebase.com/docs/web_services/login"""
         
-        service = '/api/account/login'
-        
-        username = username or self.username
-        password = password or self.password
-        
-        assert username is not None
-        assert password is not None
-        
-        self.log.debug('LOGIN USERNAME: %s', username)
-
-        rememberme = rememberme and "true" or "false"
-        form_params = {"username": username,
-                       "password": password }
-        domain = self._base_url.split(":")[0]
-        form_params['domain'] = '%s' % domain
-        if rememberme:
-            form_params["rememberme"] = "true"
-        r = self._httpreq_json(service, 'POST',
-                               form=form_params)
-        
-        if r.code != '/api/status/ok':
-            raise MetawebError(u'%s %r' % (r.get('code',''), r.messages))
-        
-        self.log.debug('LOGIN RESP: %r', r)
-        self.log.debug('LOGIN COOKIES: %s', self.cookiejar)
+        raise Exception("Authenticated acess not supported.")
     
     def logout(self):
         """logout of the service. For a more complete description,
         see http://www.freebase.com/docs/web_services/logout"""
-        
-        service = '/api/account/logout'
-        
-        self.log.debug("LOGOUT")
-        
-        r = self._httpreq_json(service, 'GET')
-        
-        if r.code != '/api/status/ok':
-            raise MetawebError(u'%s %r' % (r.get('code',''), r.messages)) #this should never happen
+
+        pass
 
     @json_params
     def user_info(self, mql_output=None):
@@ -577,7 +499,7 @@ class HTTPMetawebSession(MetawebSession):
     def mqlreaditer(self, sq, asof=None, headers=None, escape=False, **envelope):
         """read a structure query."""
         
-        cursor = True
+        cursor = ''
         service = '/api/service/mqlread'
         
         if isinstance(sq, (tuple, list)):
@@ -587,13 +509,12 @@ class HTTPMetawebSession(MetawebSession):
         
         while 1:
             subq = envelope.copy()
-            subq.update(query=[sq], cursor=cursor, escape=escape)
+            subq.update(query=json.dumps([sq]), cursor=cursor, html_escape=escape)
             if asof:
                 subq['as_of_time'] = asof
             
-            qstr = json.dumps(subq, separators=SEPARATORS)
-                        
-            r = self._httpreq_json(service, 'POST', form=dict(query=qstr), headers=headers)
+     
+            r = self._httpreq_json(service, 'GET', form=subq)
             
             for item in self._mqlresult(r):
                 yield item
@@ -604,16 +525,19 @@ class HTTPMetawebSession(MetawebSession):
             else:
                 return
     
-    def mqlread(self, sq, asof=None, headers=None, escape=False, **envelope):
+    def mqlread(self, sq, asof=None, headers=None, escape=True, **envelope):
         """read a structure query. For a more complete description,
         see http://www.freebase.com/docs/web_services/mqlread"""
         subq = envelope.copy()
-        subq.update(query=sq, escape=escape)
+        # TODO: warn that default changed for escape?
+        if headers:
+            raise Exception("Headers parameter not supported")
+        subq.update(query=json.dumps(sq), html_escape=escape)
         if asof:
             subq['as_of_time'] = asof
         
         if isinstance(sq, list):
-            subq['cursor'] = True
+            subq['cursor'] = ''
         
         service = '/api/service/mqlread'
 
@@ -621,8 +545,7 @@ class HTTPMetawebSession(MetawebSession):
                       service,
                       Delayed(logformat, sq))
         
-        qstr = json.dumps(subq, separators=SEPARATORS)
-        r = self._httpreq_json(service, 'POST', form=dict(query=qstr), headers=headers)
+        r = self._httpreq_json(service, 'GET', form=subq)
         
         return self._mqlresult(r)
     
@@ -722,7 +645,7 @@ class HTTPMetawebSession(MetawebSession):
         
         return body
     
-    def mqlwrite(self, sq, attribution_id=None, **envelope):
+    def mqlwrite(self, sq, attribution_id=None, use_permission_of=None, **envelope):
         """do a mql write. For a more complete description,
         see http://www.freebase.com/docs/web_services/mqlwrite"""
         query = envelope.copy()
@@ -854,21 +777,9 @@ class HTTPMetawebSession(MetawebSession):
     def geosearch(self,format="json",**kwargs):
         """ perform a geosearch. For a more complete description,
         see http://www.freebase.com/api/service/geosearch?help """
+
+        raise Exception("The Freebase Geosearch API has been retired. Update your code to use Search")
         
-        service = "/api/service/geosearch"
-        
-        if location is None and location_type is None and mql_input is None:
-            raise Exception("You have to give it something to work with")
-        
-        form = dict()
-        form.update(kwargs)
-               
-        if format == "json":
-            r = self._httpreq_json(service, 'POST', form=form)
-        else:
-            r = self._httpreq(service, 'POST', form=form)
-            
-        return r
     
     def version(self):
         """ get versions for various parts of freebase. For a more
